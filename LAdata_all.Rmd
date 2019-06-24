@@ -1,5 +1,10 @@
 ---
 title: "Filling in Census Gaps: Geographical and Discrepancy Depictions for LA Housing/Census Project"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 author: "David Haley, Jonni Johnson, and Lydia Palma"
 output: 
   html_document:
