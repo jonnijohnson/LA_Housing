@@ -216,6 +216,7 @@ AllData = cbind(AllData, CH)
 
 ```
 
+
 #Identification of "Discrepant" Areas
 
 Areas with number closest to "0" essentially mean that the Census multi-family housing total is similar with the totals reported from the LA housing data sets. These areas are not considered: Instead we chose to examine the extreme areas where the Census count was over- or under-estimating total multi-family housing units by using the 1st quartile and 3rd quartile as cut-off scores, respectively. This step essentially reduces the data set from just under 1,000 to approximately 260 largely discrepant sections (130 sections under-estimated and 130 sections over-estimated) 
