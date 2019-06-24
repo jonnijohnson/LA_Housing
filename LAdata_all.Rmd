@@ -1,0 +1,581 @@
+---
+title: "Filling in Census Gaps: Geographical and Discrepancy Depictions for LA Housing/Census Project"
+author: "David Haley, Jonni Johnson, and Lydia Palma"
+output: 
+  html_document:
+        toc: true
+        toc_depth: 2
+        toc_float: true
+        theme: journal
+        highlight: tango
+  
+---
+
+```{r setup, include=FALSE}
+#set up the knitr
+#knitr::opts_knit$set(root.dir = 'K:\\School Computer Desktop Files\\Stats Program Scropts  R, MPLUS,SPSS\\289G Final Project', warning=FALSE, message=FALSE)
+
+```
+
+Here we describe the initial steps taken to identify discrepant areas between the American Community Survey (Census) and the LUPAMS/HCID-LA data sets. We were interested in geographically mapping areas of discrepancies in LA county for multiple family units among the data sets. Indicators associated with these discrepancies are also discussed. 
+
+
+#Analysis of LA Rental Housing
+
+Load Data
+```{r, message=FALSE, warning=FALSE}
+#install.packages("rgdal") #-- install packages as needed
+#install.packages("ggmap")
+#install.packages("maptools")
+#install.packages("rgeos")
+library(rgdal)    # for readOGR
+library(ggplot2)
+library(ggmap)
+library(rgeos)
+library(GGally)
+CensusData = read.csv("Palm-LosAngelesRentalCensus.csv")
+FullROIData = read.csv("ROI_12.15.14.csv")
+```
+
+
+####Take a peek at both data sets
+```{r}
+head(CensusData)
+head(FullROIData)
+str(CensusData)
+```
+Notice that the CensusData is incomplete -- only 1000 data points!  This must be a subset of the original data.
+
+For this reason, we need to create a subset of ROIData to only include the same 1000 GEOID's as CensusData. The census data has 8 variables for the 1000 GEOID's where the ROI data has 137 variables for the 1000 GEOID's. 
+
+```{r}
+ROIData = FullROIData[FullROIData$GEOID %in% CensusData$GEOID,]
+head(ROIData)
+```
+
+#Data Set Structure
+
+Look at structure in order to get an intuition for the nature of this data
+
+```{r}
+str(CensusData)
+```
+
+Here is a copy of the dictionary supplied:
+1.  GEOID
+  + Census tract identification number
+  
+2. ACS_MFRENTALS
+  + The number of rentals in multi-family units in a given tract, from the 2015 5 year wave ACS Data Table B20532
+  
+3. ACS_Owners
+  + The Number of owner occupied units of all types, from the 2015 5 year wave ACS Data Table B20532
+  
+4. ACS_SF_Rents
+  + The number of rentals in single family and single-family attached units in a given tract, from the 2015 5 year wave ACS Data Table B20532
+  
+5. LUPAMS
+  + Data from the LUPAMS office on the number of multi-family rentals registered on site (as required by the City's proactive rental inspection program).
+  
+6. HCIDLA
+  + Data from the HCIDLA office on the number of multi-family rentals registered on site.
+  
+7. Data Sets
+  + LUPAMS_RC
+    + Data from the LUPAMS office on the number of rent-controlled multi-family rentals registered on site (as required by the City's proactive rental inspection program).
+  + HCIDLA_RC
+    + Data from the HCIDLA office on the number of rent-controlled multi-family rentals registered on site.
+
+```{r}
+#the ROIData includes some apparently county wide statistics
+ROIData[ROIData$population == "<Null>",]
+ROIData[ROIData$population == 0,]
+```
+
+```{r}
+#Clean ROIData
+CountyStats1 = ROIData[ROIData$population == "<Null>",]
+CountyStats2 = ROIData[ROIData$population == 0,]
+
+#remove the rows that have zero population or null population
+#remove county name and county fips (since all are LA and 37, respectively)
+CleanROI = ROIData[!(ROIData$population %in% c(0,"<Null>")),
+                   !(names(ROIData) %in% c("cntyfips","cntyname"))]
+CleanROI = droplevels(CleanROI)
+```
+
+A big problem with this data right now is that much of the data is stored as factors and not as numbers.  By dropping the county-wide data and dropping levels, we have removed some of the problem, but there are still many columns with missing entries.
+
+```{r}
+AllData = merge(CleanROI, CensusData)
+head(AllData)
+```
+
+
+Let's get a summary for the census data that was provided to see if there is consistency between the ACS, LUPAMS, and HCIDLA reporting agencies:
+
+```{r}
+MFrentals_ACS = summary(CensusData$ACS_MFRENTALS)
+owner_ACS = summary(CensusData$ACS_Owners)
+SFrentals_ACS = summary(CensusData$ACS_SF_Rents) 
+MFrentals_LUPAMS = summary(CensusData$LUPAMS)
+MFrentals_HCIDLA = summary(CensusData$HCIDLA)
+rentControl_LUPAMS = summary(CensusData$LUPAMS_RC)
+rentControl_HCIDLA = summary(CensusData$HCIDLA_RC)
+```
+
+Create table showing results of summaries for the multi-family data provided from ACS, HCIDLA, and LUPAMS. From the summary, there is a slight discrepency on the means between the HCIDLA and LUPAMS data (0.6) and a much greater difference between the ACS data (over 54). 
+
+```{r}
+multiFamily_census = cbind(MFrentals_ACS, MFrentals_HCIDLA, MFrentals_LUPAMS)
+multiFamily_census
+```
+
+Attempt to see where the discrepencies/similarities are:
+
+```{r}
+census2 = cbind(CensusData,CensusData$HCIDLA == CensusData$ACS_MFRENTALS)
+```
+
+
+
+Create table showing results of summaries for the rent-controlled multi-family homes data provided from HCIDLA and LUPAMS:
+
+```{r}
+rentControlled_census = cbind(rentControl_HCIDLA, rentControl_LUPAMS)
+rentControlled_census
+```
+As you can see this doesn't quite work becuse of the many empty values with either 0 or NA. 
+
+
+
+##Create the metric
+
+We are going to create a metric that captures the relative difference between the ACS data and the other data sources.  These will be named CL and CH respectively for the LUPAMS data and the HCIDLA data.
+
+```{r}
+library(ggplot2)
+AllData$ACS_Total = AllData$ACS_MFRENTALS+AllData$ACS_Owners+AllData$ACS_SF_Rents
+
+CL = (AllData$LUPAMS-AllData$ACS_MFRENTALS)/AllData$ACS_Total
+CH = (AllData$HCIDLA-AllData$ACS_MFRENTALS)/AllData$ACS_Total
+
+(summary(CL[AllData$ACS_Total >= 100]))
+(summary(CH[AllData$ACS_Total >= 100]))
+
+#quick graphical examination of the distribution of discrepant scores
+boxplot(CL[AllData$ACS_Total >= 100])
+boxplot(CH[AllData$ACS_Total >= 100])
+
+
+#visualize this with a boxplot
+CCL = cbind(CL[AllData$ACS_Total >= 100], "LUPAMS")
+CCH = cbind(CH[AllData$ACS_Total >= 100], "HCIDLA")
+CMetrics = data.frame(rbind(CCL, CCH))
+names(CMetrics) = c("value","source")
+CMetrics$value = as.numeric(as.character(CMetrics$value))
+
+violin_plot = ggplot2::ggplot(data=CMetrics, aes(x=source, y=value, color=value)) +
+  geom_violin() + coord_flip() + theme_bw() +
+  scale_y_continuous(limits=c(-1,1)) +
+  geom_rug() + scale_color_gradientn(colours=c("red","white", "blue"), na.value = NA) +
+  theme(legend.position="bottom") +
+  labs(title="Distribution of Metrics",x="",y="", color="Relative Difference")
+
+box_plot = ggplot2::ggplot(data=CMetrics, aes(x=source, y=value, color=value)) +
+  geom_boxplot(outlier.shape = 4) + coord_flip() + theme_bw() +
+  scale_y_continuous(limits=c(-1,1)) +
+  geom_rug() + scale_color_gradientn(colours=c("red","white", "blue"), na.value = NA) +
+  theme(legend.position="bottom") +
+  labs(title="Distribution of Metrics",x="",y="",color="Relative Difference")
+
+(violin_plot) 
+(box_plot)
+
+```
+
+```{r}
+
+CL = (AllData$LUPAMS-AllData$ACS_MFRENTALS)/AllData$ACS_Total
+
+#...and similarly for HCID
+
+CH = (AllData$HCIDLA-AllData$ACS_MFRENTALS)/AllData$ACS_Total
+
+
+
+#adding these discrepancy scores to the data set
+
+AllData = cbind(AllData, CL)
+AllData = cbind(AllData, CH)
+
+```
+
+#Identification of "Discrepant" Areas
+
+Areas with number closest to "0" essentially mean that the Census multi-family housing total is similar with the totals reported from the LA housing data sets. These areas are not considered: Instead we chose to examine the extreme areas where the Census count was over- or under-estimating total multi-family housing units by using the 1st quartile and 3rd quartile as cut-off scores, respectively. This step essentially reduces the data set from just under 1,000 to approximately 260 largely discrepant sections (130 sections under-estimated and 130 sections over-estimated) 
+We subsetted out the largest discrepancies in LUPAMS first. 
+
+</b>
+
+Above the 3rd quartile (i.e., areas where LUPAMS reported more multi-family units), were just over 250 observations, ranging from discrepant scores of .14310 - .86520. 
+
+</b>
+
+We further split this up at the median discrepant value of these observations to create areas that were "moderately discrepant" vs. "severely discrepant." For the remaining markdown description, only the severely discrepant analyses are presented, which ultimately consisted of 124 observations/areas identified as being severly discrepant, over ACS reporting values. 
+
+```{r}
+over3rdCL <- AllData[AllData$CL > 0.14310,] #leaves 254 observations 
+
+
+severelyover <- over3rdCL[over3rdCL$CL > .2549,]  #leaves with 124 observations  
+                                                  
+#dropping infinity values from set
+severelyover <- severelyover[-c(114, 123, 127:129),]  
+
+
+
+```
+
+
+Similar steps were followed for scores below the 1st quartile of the total group, and subsequently below the median value of the 1st quartile only group.
+
+</b>
+
+This left us with *128* observation/areas identified as being severly discrepant, under ACS reporting values. 
+
+```{r}
+under1stCL <- AllData[AllData$CL < -0.02207,]
+summary(under1stCL$CL)
+severelyunderCL <- under1stCL[under1stCL$CL < -0.08166,]
+```
+
+Similar steps were done with the HCID data set. Total observations and distributions indicated that both LUPAMS and HCID were reporting similar totals of multi-family units. Given this, we do not discuss the confirmed correlational analyses obtained with the HCID data to minimize redudancy of the report.
+
+
+#Preliminary Correlations
+
+With identified discrepant areas, we next examined correlations among ACS-ROI variables and discrepancies between ACS and LUPAMS for Multifamily households
+
+
+Presented first are all available correlations are all/only for the *severely over* LUPAMS Estimated Group. Variables were supplied as being "people"-related (e.g., percent of college educated residents) or "place"-related (e.g., percentage of 9th graders who go on to graduate in the area). Variables that were education-place did not have variability in the score (i.e., were the same) and could not be included in analyses presented below. 
+
+```{r, warning = FALSE, message = FALSE}
+
+#People Variables
+
+#Education related
+
+CLSevOvEduPpl = cbind(severelyover[, names(severelyover) %in% c("CL", "edppl1", "edppl2", "edppl3", "edppl4")])
+CLSevOvEduPpl[] = lapply(CLSevOvEduPpl, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLOSevEduPpl <- ggpairs(CLSevOvEduPpl)  
+
+
+#Housing, Economic, and Civic Life related
+
+CLSevOvEconHousePpl = cbind(severelyover[, names(severelyover) %in% c("CL", "ecppl1", "ecppl2", "hsppl1", "hsppl2", "soppl1", "soppl3")])
+CLSevOvEconHousePpl[] = lapply(CLSevOvEconHousePpl, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLOSevEcoPpl  <- ggpairs(CLSevOvEconHousePpl)
+
+
+#Mobility and Health related
+
+CLSevOvMobHeal = cbind(severelyover [, names(severelyover) %in% c("CL", "moppl1", "moppl2", "moppl3", "enppl1", "enppl2", "enppl3")])
+CLSevOvMobHeal[] = lapply(CLSevOvMobHeal, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLOSevMob <- ggpairs(CLSevOvMobHeal)
+
+
+
+#Place data 
+
+#Economics related
+
+
+CLSevOvEcoPlc = cbind(severelyover [, names(severelyover) %in% c("CL", "ecplc1", "ecplc2", "ecplc3", "ecplc4", "ecplc5")])
+CLSevOvEcoPlc[] = lapply(CLSevOvEcoPlc, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLOSevEcoplc <- ggpairs(CLSevOvEcoPlc)
+
+
+#Housing, Health, Civic related
+
+CLSevOvOthPlc = cbind(severelyover [, names(severelyover) %in% c("CL", "hsplc1", "hsplc2", "enplc1", "enplc2", "enplc3", "enplc4", "soplc1", "soplc2")])
+
+CLSevOvOthPlc[] = lapply(CLSevOvOthPlc, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+
+CorrCLOSevOthplc <- ggpairs(CLSevOvOthPlc)
+
+
+
+#General Resident Demographic related
+
+CLSevOvCens = cbind(severelyover [, names(severelyover) %in% c("CL", "pct_un18", "pct_ov65", "pct_hisp", "pct_asian", "pct_black", "pct_white")])
+
+CLSevOvCens[] = lapply(CLSevOvCens, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+
+CorrCLOSevCens <- ggpairs(CLSevOvCens)
+
+```
+
+An individual examination of each of the correlational objects indicated the top 8 correlations with the discrepant LUPAMS score in instances where the LUPAMS multi-family count was *greater* than the ACS count
+
+```{r, warning=FALSE, message=FALSE}
+CorrCLOSevEduPpl
+CorrCLOSevEcoPpl
+CorrCLOSevMob
+CorrCLOSevEcoplc
+CorrCLOSevOthplc
+CorrCLOSevCens
+```
+
+Next, similar steps were taken to examine ACS ROI variables with the LUPAMS discrepant group that was *severely under* the total reported by ACS.
+
+```{r, warning = FALSE, message = FALSE}
+#People Variables
+
+#Education related
+
+CLSevUnEduPpl = cbind(severelyunderCL[, names(severelyunderCL) %in% c("CL", "edppl1", "edppl2", "edppl3", "edppl4")])
+CLSevUnEduPpl[] = lapply(CLSevUnEduPpl, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevEduPpl <- ggpairs(CLSevUnEduPpl)
+
+
+#Housing, Economic, and Civic Life related
+
+CLSevUnEconHousePpl = cbind(severelyunderCL[, names(severelyunderCL) %in% c("CL", "ecppl1", "ecppl2", "hsppl1", "hsppl2", "soppl1", "soppl3")])
+CLSevUnEconHousePpl[] = lapply(CLSevUnEconHousePpl, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevEcoPpl  <- ggpairs(CLSevUnEconHousePpl)
+
+
+#Mobility and Health related
+
+CLSevUnMobHeal = cbind(severelyunderCL [, names(severelyunderCL) %in% c("CL", "moppl1", "moppl2", "moppl3", "enppl1", "enppl2", "enppl3")])
+CLSevUnMobHeal[] = lapply(CLSevUnMobHeal, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevMob <- ggpairs(CLSevUnMobHeal)
+
+
+#Place variables
+
+
+#Economics related
+
+
+CLSevUnEcoPlc = cbind(severelyunderCL [, names(severelyunderCL) %in% c("CL", "ecplc1", "ecplc2", "ecplc3", "ecplc4", "ecplc5")])
+CLSevUnEcoPlc[] = lapply(CLSevUnEcoPlc, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevEcoplc <- ggpairs(CLSevUnEcoPlc)
+
+
+#Housing, Health and Civic related
+
+CLSevUnOthPlc = cbind(severelyunderCL [, names(severelyunderCL) %in% c("CL", "hsplc1", "hsplc2", "enplc1", "enplc2", "enplc3", "enplc4", "soplc1", "soplc2")])
+CLSevUnOthPlc[] = lapply(CLSevUnOthPlc, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevOthplc <- ggpairs(CLSevUnOthPlc)
+
+
+
+#General Census data
+
+CLSevUnCens = cbind(severelyunderCL [, names(severelyunderCL) %in% c("CL", "pct_un18", "pct_ov65", "pct_hisp", "pct_asian", "pct_black", "pct_white")])
+CLSevUnCens[] = lapply(CLSevUnCens, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+CorrCLUSevCens <- ggpairs(CLSevUnCens)
+```
+
+An individual examination of each of the correlational objects indicated the top 8 correlations with the discrepant LUPAMS score in instances where the LUPAMS multi-family count was *lesser* than the ACS count
+
+```{r, warning = FALSE, message = FALSE}
+CorrCLUSevEduPpl
+CorrCLUSevEcoPpl
+CorrCLUSevMob
+CorrCLUSevEcoplc
+CorrCLUSevOthplc
+CorrCLUSevCens
+```
+
+
+
+#Graphing Correlations of Interest {.tabset}
+
+##Severely Under Correlations
+
+A subset of the pooled variables of interest (i.e., 8 highest correlations that did not indicate multicollinearity with each other and LUPAMS discrepant score) were collected to make the final graphical depiction of variables of interest.
+
+```{r, warning = FALSE, message = FALSE}
+
+UnderCorrSet = cbind(severelyunderCL[, names(severelyunderCL) %in% c("CL", "pct_black", "ecppl1", "ecppl2", "hsppl1", "ecplc2", "ecplc5", "enplc1", "enplc4")])
+
+
+
+#added specific names to assist in interpretation
+
+colnames(UnderCorrSet) <- c("Black", "Employ", "MinInc", "OwnHom", "JobGrow", "BusGrow", "JobAvail", "AirQual", "LUPDEC")
+
+UnderCorrSet[] = lapply(UnderCorrSet, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+
+#added color and linear regression line to each scatter plot
+
+UnderCorrGraph <- ggpairs(UnderCorrSet, 
+                          lower = list(continuous = wrap("smooth", colour = "red")))
+
+
+UnderCorrGraph
+```
+
+##Severely Under Additional
+
+Additional graphical exploration plotted the two highest correlation values (i.e., percentage of black residents and available jobs in the area) with the LUPAMS discrepant values 
+```{r, warning = FALSE, message = FALSE}
+Underbubble <- ggplot(UnderCorrSet, aes(x = JobAvail, y = LUPDEC, size = Black)) +
+  geom_point(shape = 21, color = "red", alpha = .8) +
+   labs(title = "Job Availability, Black Resident, and ACS and LUPAMS Differences", x = "Job Availability", y = "Relative Differences") +
+             theme(plot.title =element_text(size = 16, face = "bold", hjust = 1),
+              axis.text.x = element_text(size = 5),
+              axis.text.y = element_text(size = 5),
+              axis.title.x = element_text(size = 8),
+              axis.title.y = element_text(size = 8)) +
+             theme_classic()
+
+Underbubble 
+```
+
+
+##Severely Over Correlations
+
+A subset of the pooled variables of interest (i.e., 8 highest correlations that did not indicate multicollinearity with each other and LUPAMS discrepant score) were gathered to plot associations between variables of interest with LUPAMS score.
+
+
+```{r, warning = FALSE, message = FALSE}
+OverCorrSet = cbind(severelyover[, names(severelyover) %in% c("CL", "pct_un18", "pct_hisp", "pct_asian", "pct_black", "pct_white", "soplc2", "hsppl1", "enppl1")])
+
+colnames(OverCorrSet) <- c("Under18", "Hisp", "Asian", "Black", "White", "OwnHom", "InfHeal", "StableHood", "LUPINC")
+OverCorrSet[] = lapply(OverCorrSet, function(x) {if(is.factor(x)) as.numeric(as.character(x)) else x })
+OverCorrGraph <- ggpairs(OverCorrSet, lower = list(continuous = wrap("smooth", colour = "royalblue")))
+
+OverCorrGraph
+```
+
+
+##Severely Over Additional
+
+Additional graphical exploration plotted the two highest correlation values (i.e., percentage of asian residents and neighborhood stability in the area) with the LUPAMS discrepant values 
+```{r, warning = FALSE, message = FALSE}
+Overbubble <- ggplot(OverCorrSet, 
+                     aes(x = StableHood, y = LUPINC, size = Asian)) + 
+  geom_point(shape = 21, color = "blue", alpha = .8) + 
+   labs(title = "Neighborhood Stability, Asian Resident, and ACS and LUPAMS Differences", 
+        x = "Neighborhood Stability", y = "Relative Differences") +
+             theme(plot.title =element_text(size = 14, face = "bold"),
+              axis.text.x = element_text(size = 5),
+              axis.text.y = element_text(size = 5),
+              axis.title.x = element_text(size = 8),
+              axis.title.y = element_text(size = 8)) +
+             theme_classic()
+
+Overbubble 
+```
+
+
+#Mapping Discrepancies
+
+Here we create maps of the data, color-coded for our metric, with and without overlays of GGmap data:
+
+
+```{r, message=FALSE, warning=FALSE}
+
+#downloaded the tract geometry info from
+# https://www.census.gov/geo/maps-data/data/cbf/cbf_tracts.html
+
+tract <- readOGR(dsn=".", layer = "cb_2015_06_tract_500k")
+```
+
+```{r}
+#pulled these two lines from a help file online
+tract@data$GEOID<-as.character(tract@data$GEOID)
+ggtract<-fortify(tract, region = "GEOID") 
+
+names(ggtract)[6] = "GEOID"
+ggtract$GEOID = as.numeric(ggtract$GEOID)
+
+#restrict tract data to just the LA area
+ggtract_LA = ggtract[ggtract$GEOID %in% CensusData$GEOID,]
+
+#trim out areas with less than 100 households
+CL[AllData$ACS_Total < 100] = NA
+CH[AllData$ACS_Total < 100] = NA
+
+housing_metrics = data.frame(cbind(AllData$GEOID,CL,CH))
+names(housing_metrics)[1] = "GEOID"
+
+#don't want the merge to re-order the geometry
+ggtract_LA$order = 1:nrow(ggtract_LA)
+all_LA_Data = merge(ggtract_LA, housing_metrics)
+all_LA_Data = all_LA_Data[order(all_LA_Data$order),]
+```
+
+```{r}
+ditch_the_axes = theme(
+  axis.text = element_blank(),
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),
+  panel.border = element_blank(),
+  panel.grid = element_blank(),
+  axis.title = element_blank(),
+  panel.background = element_blank()
+)
+```
+
+
+
+```{r}
+
+ca_base = ggplot(data = ggtract_LA, mapping = aes(x = long, y = lat, group = group), color="black") +
+  coord_fixed(1.3) +
+  geom_polygon(color = "black", fill = NA) +
+  labs(fill="Relative Difference") +
+  theme(legend.position="bottom") +
+  ditch_the_axes
+
+LA_with_colors = ca_base +
+  geom_polygon(data = all_LA_Data, aes(fill = CH)) +
+  scale_fill_gradientn(colours=c("red","white", "blue"), na.value = NA)
+
+
+
+LA_with_colors = ca_base +
+  geom_polygon(data = all_LA_Data, aes(fill = CL)) +
+  scale_fill_gradientn(colours=c("red","white", "blue"), na.value = NA)
+
+
+
+LA_with_colors
+```
+
+```{r, message=FALSE, warning=FALSE}
+LA_map = ggmap(get_map(location= c(-118.7,33.7,-118.1,34.4), zoom = 10, maptype="roadmap"))
+
+alpha = 0.8
+
+LA_with_colors = LA_map +
+  geom_polygon(data = ggtract_LA, aes(x=long,y=lat, group=group),
+               color = "black", alpha = alpha, fill = NA) +
+  geom_polygon(data = all_LA_Data, aes(x=long,y=lat, group =group, fill = CH),alpha = alpha) +
+  scale_fill_gradientn(colours=c("red","white", "blue"),
+                       na.value = NA) +
+  labs(fill="Relative Difference") +
+  theme(legend.position="bottom") +
+  ditch_the_axes
+
+
+
+LA_with_colors = LA_map +
+  geom_polygon(data = ggtract_LA, aes(x=long,y=lat, group=group),
+               color = "black", alpha = alpha, fill = NA) +
+  geom_polygon(data = all_LA_Data, aes(x=long,y=lat, group =group, fill = CL),alpha = alpha) +
+  scale_fill_gradientn(colours=c("red","white", "blue"),
+                       na.value = NA) +
+  labs(fill="Relative Difference") +
+  theme(legend.position="bottom") +
+  ditch_the_axes
+
+
+
+LA_with_colors
+```
